@@ -1,0 +1,27 @@
+"""
+Application-level constants.
+User settings (watched folder, API key, OCR thresholds, theme) are stored
+in the `settings` table in the database — not here.
+"""
+
+import os
+
+# Path to the SQLite database file (auto-created on first run)
+DB_PATH = os.path.join(os.path.dirname(__file__), "database", "magazine_library.db")
+
+# AI usage log file
+AI_USAGE_LOG = os.path.join(os.path.dirname(__file__), "ai_usage.log")
+
+# Default OCR settings (overridden by DB settings if present)
+DEFAULT_OCR_LANGUAGE = "eng"
+DEFAULT_OCR_DPI = 300
+DEFAULT_OCR_CONFIDENCE_THRESHOLD = 70
+
+# Claude model to use for AI fallback (always haiku — lowest cost)
+AI_MODEL = "claude-haiku-4-5-20251001"
+
+# PDF reader page cache size
+PAGE_CACHE_SIZE = 5
+
+# Cover thumbnail DPI
+COVER_THUMBNAIL_DPI = 150
