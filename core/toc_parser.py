@@ -59,6 +59,9 @@ _TOC_LINE_RE = re.compile(r"^[A-Z].{14,}\D\d{1,3}\s*$")
 EXCLUDED_HEADINGS = {
     "letters", "editor's note", "from the editor", "advertisers index",
     "advertisers", "index", "masthead", "credits", "subscription",
+    "woodchips", "painting tips", "tips & techniques", "news & notes",
+    "bookshelf", "calendar of events", "artists to watch", "my first carve",
+    "coming features", "letters to the editor", "editor's column",
 }
 
 
@@ -129,44 +132,59 @@ def _parse_line(line: str) -> Optional[dict]:
     if line.lower() in EXCLUDED_HEADINGS:
         return None
 
+    def _clean_title(t: str) -> str:
+        return t.strip()
+
+    def _excluded(t: str) -> bool:
+        return t.strip().lower() in EXCLUDED_HEADINGS
+
     # Pattern A: title + clean dot leaders + page
     m = TOC_PATTERNS[0].match(line)
     if m:
-        return {"title": m.group(1).strip(), "author": None, "page_number": int(m.group(2))}
+        title = m.group(1).strip()
+        return {"title": title, "author": None, "page_number": int(m.group(2)),
+                "_pattern": "A", "_excluded": _excluded(title)}
 
     # Pattern B: title + author + page (two-space separated columns)
     m = TOC_PATTERNS[1].match(line)
     if m:
-        return {"title": m.group(1).strip(), "author": m.group(2).strip(), "page_number": int(m.group(3))}
+        title = m.group(1).strip()
+        return {"title": title, "author": m.group(2).strip(), "page_number": int(m.group(3)),
+                "_pattern": "B", "_excluded": _excluded(title)}
 
     # Pattern C: page + title (+ optional author)
     m = TOC_PATTERNS[2].match(line)
     if m:
+        title = m.group(2).strip()
         return {
-            "title": m.group(2).strip(),
+            "title": title,
             "author": m.group(3).strip() if m.group(3) else None,
             "page_number": int(m.group(1)),
+            "_pattern": "C",
+            "_excluded": _excluded(title),
         }
 
     # Pattern D: ALL-CAPS title + OCR-garbled dots + page number (space before number)
     m = TOC_PATTERNS[3].match(line)
     if m:
         title = m.group(1).strip()
-        if len(title) > 4:  # skip very short noise matches
-            return {"title": title.title(), "author": None, "page_number": int(m.group(2))}
+        if len(title) > 4:
+            return {"title": title.title(), "author": None, "page_number": int(m.group(2)),
+                    "_pattern": "D", "_excluded": _excluded(title)}
 
     # Pattern E: ALL-CAPS title + garbled noise run-together with page number
     m = TOC_PATTERNS[4].match(line)
     if m:
         title = m.group(1).strip()
         if len(title) > 4:
-            return {"title": title.title(), "author": None, "page_number": int(m.group(2))}
+            return {"title": title.title(), "author": None, "page_number": int(m.group(2)),
+                    "_pattern": "E", "_excluded": _excluded(title)}
 
     return None
 
 
 def extract_articles_from_text(text: str) -> list[dict]:
-    """Parse raw TOC text into a list of article dicts."""
+    """Parse raw TOC text into a list of article dicts (with internal _pattern tag)."""
     articles = []
     for line in text.splitlines():
         result = _parse_line(line)
@@ -213,6 +231,26 @@ def parse_toc(
             all_articles.extend(articles)
     finally:
         doc.close()
+
+    # Build page_first_pages from ALL Pattern C matches (including excluded titles)
+    # so that sidebar entries echoing department pages are also deduped out.
+    page_first_pages = {
+        a["page_number"]
+        for a in all_articles
+        if a.get("_pattern") == "C" and a["page_number"] is not None
+    }
+
+    # Discard: excluded titles OR title-first entries that conflict with a page-first entry
+    all_articles = [
+        a for a in all_articles
+        if not a.get("_excluded")
+        and not (a.get("_pattern") not in ("C", "B") and a["page_number"] in page_first_pages)
+    ]
+
+    # Strip internal tracking keys
+    for a in all_articles:
+        a.pop("_pattern", None)
+        a.pop("_excluded", None)
 
     return all_articles, mean_confidence
 
