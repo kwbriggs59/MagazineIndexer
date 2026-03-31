@@ -140,11 +140,30 @@ TOC_PATTERNS = [
 
 Build phases in sequence — each is independently testable before the next:
 
-1. **Database** — `models.py`, `db.py` (schema + FTS5 triggers)
-2. **PDF/OCR Core** — `ocr_engine.py`, `toc_parser.py`, `ai_extractor.py`
-3. **Scanner** — `scanner.py` (ties core modules together, progress callbacks)
+1. ✅ **Database** — `models.py`, `db.py` (schema + FTS5 triggers)
+2. ✅ **PDF/OCR Core** — `ocr_engine.py`, `toc_parser.py`, `ai_extractor.py`
+3. **Scanner** — `scanner.py` (ties core modules together, progress callbacks) ← **NEXT**
 4. **GUI Shell** — `main_window.py`, `settings_dialog.py` (toolbar, splitter, Browse wired to DB)
 5. **PDF Reader** — `reader_panel.py` (render, zoom, nav, 5-page cache)
 6. **Library Panel** — `library_panel.py`, `article_detail.py` (tree + metadata editor)
 7. **Search** — `search_bar.py` (FTS5, debounce, dropdown, advanced panel)
 8. **Polish** — `import_dialog.py` with progress/AI prompts, right-click menus, cover thumbnails, first-run UX
+
+## Lessons Learned from Phase 2 Testing
+
+Tested against `2015-3 Wildfowl Carving.pdf` — a pure image scan with a two-column TOC.
+
+**TOC detection fixes (`toc_parser.py`):**
+- Keyword match must be line-level (not full-text) — "Contents copyright" in mastheads was a false positive
+- Heuristic regex must require `^[A-Z]` at line start — filters phone numbers, prices, masthead lines
+- Do NOT lowercase text before passing to `_is_toc_page()` — breaks the uppercase regex
+- Many Wildfowl Carving TOC magazines have two-column layout; OCR garbles dot leaders into noise strings
+
+**AI extractor fixes (`ai_extractor.py`):**
+- Claude Haiku returns ```json code fences despite the prompt saying not to — strip them before `json.loads()`
+- Render TOC pages at **150 DPI** (not 300) for AI calls — 300 DPI PNGs exceed the 5MB API image limit
+
+**Environment:**
+- Python is in Miniconda: `/c/Users/kwbri/.conda/envs/mag/python.exe`
+- Tesseract installed at: `C:\Program Files\Tesseract-OCR\tesseract.exe` (set in `config.py`)
+- Run all commands with the full conda env path or from within the activated `mag` environment
