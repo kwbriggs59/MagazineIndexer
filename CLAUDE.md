@@ -151,13 +151,22 @@ Build phases in sequence — each is independently testable before the next:
 
 ## Lessons Learned from Phase 2 Testing
 
-Tested against `2015-3 Wildfowl Carving.pdf` — a pure image scan with a two-column TOC.
+Tested against two PDFs:
+- `2015-3 Wildfowl Carving.pdf` — pure image scan, two-column TOC
+- `WCI99 Issue.pdf` — searchable text layer, single-column TOC with sidebar quick-index
 
 **TOC detection fixes (`toc_parser.py`):**
 - Keyword match must be line-level (not full-text) — "Contents copyright" in mastheads was a false positive
 - Heuristic regex must require `^[A-Z]` at line start — filters phone numbers, prices, masthead lines
 - Do NOT lowercase text before passing to `_is_toc_page()` — breaks the uppercase regex
 - Many Wildfowl Carving TOC magazines have two-column layout; OCR garbles dot leaders into noise strings
+
+**False positive deduplication (`toc_parser.py`):**
+- Some magazines have a sidebar "quick index" (e.g. `Bird...23`, `Whimsey...43`) alongside the main TOC
+- These echo real articles with shorter/category labels and must be filtered
+- Strategy: track `_pattern` per parsed entry; after collecting all pages, build `page_first_pages` from Pattern C (page-number-first) matches; discard Pattern A/D/E entries that share a page number
+- Build `page_first_pages` BEFORE applying `EXCLUDED_HEADINGS` so department pages (e.g. `96  Woodchips`) still claim their page number, blocking sidebar echoes at that page
+- `EXCLUDED_HEADINGS` checks must be applied to the **extracted title**, not the raw line
 
 **AI extractor fixes (`ai_extractor.py`):**
 - Claude Haiku returns ```json code fences despite the prompt saying not to — strip them before `json.loads()`
