@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 from datetime import datetime
 from io import BytesIO
 
@@ -97,6 +98,11 @@ def extract_toc_with_ai(page_image: Image.Image, api_key: str) -> list[dict]:
     _log_usage(response.usage.input_tokens, response.usage.output_tokens)
 
     raw = response.content[0].text.strip()
+    # Strip markdown code fences if the model included them despite instructions
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-z]*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+        raw = raw.strip()
     try:
         articles = json.loads(raw)
     except json.JSONDecodeError as e:

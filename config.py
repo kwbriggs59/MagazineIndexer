@@ -5,6 +5,10 @@ in the `settings` table in the database — not here.
 """
 
 import os
+import pytesseract
+
+# Tesseract binary path (Windows)
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Path to the SQLite database file (auto-created on first run)
 DB_PATH = os.path.join(os.path.dirname(__file__), "database", "magazine_library.db")

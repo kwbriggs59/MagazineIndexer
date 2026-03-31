@@ -172,7 +172,8 @@ def import_magazine(
             from core.toc_parser import find_toc_pages
             toc_pages = find_toc_pages(pdf_path, has_text_layer(pdf_path), ocr_dpi)
             if toc_pages:
-                page_image = render_page_to_image(pdf_path, toc_pages[0], ocr_dpi)
+                # Use 150 DPI for AI — high enough to read, stays under 5MB API limit
+                page_image = render_page_to_image(pdf_path, toc_pages[0], dpi=150)
                 try:
                     ai_results = extract_toc_with_ai(page_image, api_key)
                     # Normalise AI result keys to match toc_parser output

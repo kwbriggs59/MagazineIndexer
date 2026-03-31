@@ -26,18 +26,34 @@ TEXT_LAYER_MIN_CHARS = 50
 # Number of pages to scan when searching for the TOC
 TOC_SCAN_PAGES = 10
 
-# Keywords that identify a TOC page
-TOC_KEYWORDS = ["contents", "table of contents", "index"]
+# Patterns that identify a TOC page by keyword (matched against each line, not full text)
+# Using line-level matching avoids "Contents copyright" in mastheads triggering a hit.
+TOC_KEYWORD_RE = re.compile(
+    r"^\s*(table\s+of\s+contents|contents|in this issue)\s*$", re.IGNORECASE
+)
 
 # Regex patterns to extract (title, author?, page_number) from TOC lines
 TOC_PATTERNS = [
-    # "Article Title .................. 42"
+    # "Article Title .................. 42"  (clean dot leaders)
     re.compile(r"^(.+?)\s*[.\-]{3,}\s*(\d+)\s*$"),
     # "Article Title   Author Name   42"
     re.compile(r"^(.+?)\s{2,}([A-Z][a-z].+?)\s{2,}(\d+)$"),
     # "42   Article Title"
     re.compile(r"^(\d+)\s{2,}(.+?)(?:\s{2,}(.+?))?$"),
+    # OCR-garbled dot leaders: title + noise/garbage + page number at end
+    # e.g. "WINTER LAKESHORE  ...scccssesesssseessesseeeelQ 10" or "TITLE garbage 42"
+    re.compile(r"^([A-Z][A-Z\s,\'\-\&]+?)\s+\S*\s*(\d{1,3})\s*$"),
+    # Title with garbled leader where number is run onto noise: "TITLE ...garbage42"
+    re.compile(r"^([A-Z][A-Z\s,\'\-\&]+?)\s+\S+(\d{1,3})\s*$"),
 ]
+
+# Minimum number of lines ending in a page-like number to identify a TOC page.
+# 15-char minimum before the number avoids short noise lines (captions, footers).
+_TOC_LINE_MIN_HITS = 3
+# TOC entries start with uppercase and end with a page number (1-3 digits).
+# The digit may be glued to garbled dot-leader noise (no preceding space).
+# Starting with [A-Z] filters out masthead lines, phone numbers, prices, etc.
+_TOC_LINE_RE = re.compile(r"^[A-Z].{14,}\D\d{1,3}\s*$")
 
 # Department headings to exclude from article results
 EXCLUDED_HEADINGS = {
@@ -58,6 +74,22 @@ def has_text_layer(pdf_path: str) -> bool:
     return False
 
 
+def _is_toc_page(text: str) -> bool:
+    """
+    Return True if this page looks like a table of contents.
+    Two strategies:
+      1. Keyword match on individual lines only (avoids "Contents copyright" in mastheads).
+      2. Heuristic: >= _TOC_LINE_MIN_HITS lines that end with a 1-3 digit number
+         preceded by enough content — characteristic of dot-leader TOC entries
+         even when OCR garbles the dots.
+    """
+    for line in text.splitlines():
+        if TOC_KEYWORD_RE.match(line):
+            return True
+    hits = sum(1 for line in text.splitlines() if _TOC_LINE_RE.search(line))
+    return hits >= _TOC_LINE_MIN_HITS
+
+
 def find_toc_pages(pdf_path: str, has_text: bool, dpi: int = None) -> list[int]:
     """
     Scan the first TOC_SCAN_PAGES pages and return 0-indexed page numbers
@@ -73,12 +105,11 @@ def find_toc_pages(pdf_path: str, has_text: bool, dpi: int = None) -> list[int]:
         limit = min(TOC_SCAN_PAGES, doc.page_count)
         for i in range(limit):
             if has_text:
-                text = doc[i].get_text().lower()
+                text = doc[i].get_text()
             else:
                 text, _ = ocr_page(pdf_path, i, dpi)
-                text = text.lower()
 
-            if any(kw in text for kw in TOC_KEYWORDS):
+            if _is_toc_page(text):
                 toc_pages.append(i)
     finally:
         doc.close()
@@ -98,12 +129,12 @@ def _parse_line(line: str) -> Optional[dict]:
     if line.lower() in EXCLUDED_HEADINGS:
         return None
 
-    # Pattern A: title + dots + page
+    # Pattern A: title + clean dot leaders + page
     m = TOC_PATTERNS[0].match(line)
     if m:
         return {"title": m.group(1).strip(), "author": None, "page_number": int(m.group(2))}
 
-    # Pattern B: title + author + page
+    # Pattern B: title + author + page (two-space separated columns)
     m = TOC_PATTERNS[1].match(line)
     if m:
         return {"title": m.group(1).strip(), "author": m.group(2).strip(), "page_number": int(m.group(3))}
@@ -116,6 +147,20 @@ def _parse_line(line: str) -> Optional[dict]:
             "author": m.group(3).strip() if m.group(3) else None,
             "page_number": int(m.group(1)),
         }
+
+    # Pattern D: ALL-CAPS title + OCR-garbled dots + page number (space before number)
+    m = TOC_PATTERNS[3].match(line)
+    if m:
+        title = m.group(1).strip()
+        if len(title) > 4:  # skip very short noise matches
+            return {"title": title.title(), "author": None, "page_number": int(m.group(2))}
+
+    # Pattern E: ALL-CAPS title + garbled noise run-together with page number
+    m = TOC_PATTERNS[4].match(line)
+    if m:
+        title = m.group(1).strip()
+        if len(title) > 4:
+            return {"title": title.title(), "author": None, "page_number": int(m.group(2))}
 
     return None
 
