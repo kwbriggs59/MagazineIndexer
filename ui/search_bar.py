@@ -64,12 +64,13 @@ class SearchBar(QWidget):
 
         layout.addLayout(row)
 
-        # Results dropdown
-        self._results = QListWidget()
+        # Results popup — parented to None so it floats above the toolbar
+        self._results = QListWidget(None)
+        self._results.setWindowFlags(Qt.WindowType.Popup)
+        self._results.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._results.setFixedHeight(200)
         self._results.hide()
         self._results.itemClicked.connect(self._on_result_click)
-        layout.addWidget(self._results)
 
         # Advanced search panel
         self._adv_panel = QGroupBox("Advanced Search")
@@ -168,7 +169,16 @@ class SearchBar(QWidget):
             item.setData(Qt.ItemDataRole.UserRole, aid)
             self._results.addItem(item)
 
-        self._results.setVisible(bool(rows))
+        if rows:
+            # Position popup directly below the search input
+            pos = self._search_input.mapToGlobal(
+                self._search_input.rect().bottomLeft()
+            )
+            self._results.move(pos)
+            self._results.setFixedWidth(max(400, self._search_input.width()))
+            self._results.show()
+        else:
+            self._results.hide()
 
     def _on_result_click(self, item: QListWidgetItem):
         article_id = item.data(Qt.ItemDataRole.UserRole)

@@ -114,9 +114,17 @@ class ReaderPanel(QWidget):
             if article is None:
                 return
             pdf_path = article.magazine.pdf_path
-            page_start = (article.page_start or 1) - 1  # convert 1-indexed to 0-indexed
+            offset = article.magazine.page_offset or 0
+            page_start = (article.page_start or 1) - 1 + offset  # printed page → 0-based PDF index
         finally:
             session.close()
+
+        if not pdf_path:
+            self._page_label.setText(
+                "No PDF available for this issue.\nThis is a catalog-only entry."
+            )
+            self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            return
 
         self.open_pdf(pdf_path, max(0, page_start))
 

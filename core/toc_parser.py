@@ -55,6 +55,9 @@ _TOC_LINE_MIN_HITS = 3
 # Starting with [A-Z] filters out masthead lines, phone numbers, prices, etc.
 _TOC_LINE_RE = re.compile(r"^[A-Z].{14,}\D\d{1,3}\s*$")
 
+# "By Author Name" attribution line (WCI style)
+_BY_AUTHOR_RE = re.compile(r"^[Bb]y\s+(.+)$")
+
 # Department headings to exclude from article results
 EXCLUDED_HEADINGS = {
     "letters", "editor's note", "from the editor", "advertisers index",
@@ -183,12 +186,68 @@ def _parse_line(line: str) -> Optional[dict]:
     return None
 
 
+def _looks_like_author(line: str) -> bool:
+    """Return True if line looks like a plain author name (no 'By' prefix)."""
+    if not line or len(line) > 60 or line[0].isdigit():
+        return False
+    if any(c.isdigit() for c in line):
+        return False
+    words = line.split()
+    if len(words) < 1 or len(words) > 6:
+        return False
+    # Reject ALL-CAPS lines (those are section headings / article titles)
+    if line == line.upper() and len(line) > 4:
+        return False
+    return True
+
+
+def _find_author_after(lines: list[str], start: int) -> Optional[str]:
+    """
+    Look ahead from `start` for an author attribution.
+
+    Handles two formats:
+      - Plain name on the very next non-empty line  (Wildfowl Carving style)
+      - "By Name" anywhere within the next 10 lines (WCI style)
+
+    Stops if another article entry is encountered.
+    """
+    first_nonempty_idx: Optional[int] = None
+
+    for j in range(start, min(start + 10, len(lines))):
+        line = lines[j].strip()
+        if not line:
+            continue
+
+        if first_nonempty_idx is None:
+            first_nonempty_idx = j
+
+        # "By Author Name" — accepted anywhere in the look-ahead window
+        m = _BY_AUTHOR_RE.match(line)
+        if m:
+            return m.group(1).strip()
+
+        # Stop if we hit another article entry
+        if _parse_line(line) or _TOC_LINE_RE.search(line):
+            break
+
+    # No "By" found — check if the first non-empty line was a plain name
+    if first_nonempty_idx is not None:
+        candidate = lines[first_nonempty_idx].strip()
+        if _looks_like_author(candidate):
+            return candidate
+
+    return None
+
+
 def extract_articles_from_text(text: str) -> list[dict]:
     """Parse raw TOC text into a list of article dicts (with internal _pattern tag)."""
+    lines = [l.strip() for l in text.splitlines()]
     articles = []
-    for line in text.splitlines():
+    for i, line in enumerate(lines):
         result = _parse_line(line)
         if result:
+            if result.get("author") is None:
+                result["author"] = _find_author_after(lines, i + 1)
             articles.append(result)
     return articles
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
     QMenu, QComboBox, QCheckBox, QHBoxLayout, QLabel,
+    QInputDialog,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QAction
@@ -38,6 +39,13 @@ class LibraryPanel(QWidget):
 
         # --- Filter / sort controls ---
         controls = QHBoxLayout()
+
+        controls.addWidget(QLabel("Magazine:"))
+        self._pub_filter = QComboBox()
+        self._pub_filter.addItem("All")
+        self._pub_filter.currentIndexChanged.connect(self.refresh)
+        controls.addWidget(self._pub_filter)
+
         controls.addWidget(QLabel("Sort:"))
 
         self._sort_combo = QComboBox()
@@ -74,11 +82,40 @@ class LibraryPanel(QWidget):
 
         session = get_session()
         try:
-            magazines = session.query(Magazine).order_by(Magazine.title, Magazine.year.desc()).all()
+            # --- Repopulate publication filter, preserving selection ---
+            current_pub = self._pub_filter.currentText()
+            # Temporarily disconnect to prevent recursive refresh
+            self._pub_filter.blockSignals(True)
+            self._pub_filter.clear()
+            self._pub_filter.addItem("All")
+            pubs = (
+                session.query(Magazine.publication)
+                .filter(Magazine.publication.isnot(None))
+                .distinct()
+                .order_by(Magazine.publication)
+                .all()
+            )
+            for (pub_name,) in pubs:
+                if pub_name:
+                    self._pub_filter.addItem(pub_name)
+            # Restore previous selection
+            idx = self._pub_filter.findText(current_pub)
+            self._pub_filter.setCurrentIndex(idx if idx >= 0 else 0)
+            self._pub_filter.blockSignals(False)
+
+            selected_pub = self._pub_filter.currentText()
+
+            # --- Query magazines with optional publication filter ---
+            query = session.query(Magazine)
+            if selected_pub and selected_pub != "All":
+                query = query.filter(Magazine.publication == selected_pub)
+            magazines = query.order_by(Magazine.title, Magazine.year.desc()).all()
+
             unread_only = self._unread_only.isChecked()
 
             for mag in magazines:
-                articles = mag.articles
+                articles = sorted(mag.articles,
+                                  key=lambda a: (a.page_start is None, a.page_start or 0))
                 if unread_only:
                     articles = [a for a in articles if not a.is_read]
                 if not articles:
@@ -131,29 +168,64 @@ class LibraryPanel(QWidget):
         if not item:
             return
         data = item.data(0, Qt.ItemDataRole.UserRole)
-        if not data or data[0] != "article":
+        if not data:
             return
 
-        article_id = data[1]
         menu = QMenu(self)
 
+        if data[0] == "issue":
+            mag_id = data[1]
+            offset_action = QAction("Set Page Offset…", self)
+            offset_action.triggered.connect(lambda: self._set_page_offset(mag_id))
+            menu.addAction(offset_action)
+
+        elif data[0] == "article":
+            article_id = data[1]
+
+            session = get_session()
+            try:
+                article = session.get(Article, article_id)
+                is_read = bool(article.is_read)
+            finally:
+                session.close()
+
+            toggle_label = "Mark as Unread" if is_read else "Mark as Read"
+            toggle_action = QAction(toggle_label, self)
+            toggle_action.triggered.connect(lambda: self._toggle_read(article_id, not is_read))
+            menu.addAction(toggle_action)
+
+            open_action = QAction("Open to This Page", self)
+            open_action.triggered.connect(lambda: self.article_selected.emit(article_id))
+            menu.addAction(open_action)
+
+        if not menu.isEmpty():
+            menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _set_page_offset(self, mag_id: int):
         session = get_session()
         try:
-            article = session.get(Article, article_id)
-            is_read = bool(article.is_read)
+            mag = session.get(Magazine, mag_id)
+            current = mag.page_offset or 0
         finally:
             session.close()
 
-        toggle_label = "Mark as Unread" if is_read else "Mark as Read"
-        toggle_action = QAction(toggle_label, self)
-        toggle_action.triggered.connect(lambda: self._toggle_read(article_id, not is_read))
-        menu.addAction(toggle_action)
+        value, ok = QInputDialog.getInt(
+            self,
+            "Set Page Offset",
+            "Number of unnumbered pages before page 1\n"
+            "(auto-detected on import — adjust if articles open to the wrong page)",
+            current, 0, 50,
+        )
+        if not ok:
+            return
 
-        open_action = QAction("Open to This Page", self)
-        open_action.triggered.connect(lambda: self.article_selected.emit(article_id))
-        menu.addAction(open_action)
-
-        menu.exec(self._tree.viewport().mapToGlobal(pos))
+        session = get_session()
+        try:
+            mag = session.get(Magazine, mag_id)
+            mag.page_offset = value
+            session.commit()
+        finally:
+            session.close()
 
     def _toggle_read(self, article_id: int, is_read: bool):
         session = get_session()

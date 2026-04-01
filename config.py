@@ -16,6 +16,9 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "database", "magazine_library.
 # AI usage log file
 AI_USAGE_LOG = os.path.join(os.path.dirname(__file__), "ai_usage.log")
 
+# Import progress log (overwritten each run — open during import to watch live)
+IMPORT_LOG = os.path.join(os.path.dirname(__file__), "import.log")
+
 # Default OCR settings (overridden by DB settings if present)
 DEFAULT_OCR_LANGUAGE = "eng"
 DEFAULT_OCR_DPI = 300
@@ -29,3 +32,6 @@ PAGE_CACHE_SIZE = 5
 
 # Cover thumbnail DPI
 COVER_THUMBNAIL_DPI = 150
+
+# Woodcarving Illustrated master index CSV (dropped in project root)
+WCI_INDEX_CSV = os.path.join(os.path.dirname(__file__), "woodcarving_illustrated_article_index.csv")

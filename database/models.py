@@ -23,9 +23,11 @@ class Magazine(Base):
     issue_number  = Column(Integer)
     season        = Column(String)           # e.g. "Spring", "Fall"
     year          = Column(Integer)
-    pdf_path      = Column(String, unique=True, nullable=False)  # absolute path
+    publication   = Column(String)           # magazine series name, e.g. "Wildfowl Carving"
+    pdf_path      = Column(String, unique=True, nullable=True)   # absolute path; NULL for index-only entries
     page_count    = Column(Integer)
     cover_image   = Column(LargeBinary)      # PNG bytes of cover thumbnail
+    page_offset   = Column(Integer, default=0)  # unnumbered pages before page 1 (cover, ads, etc.)
     date_imported = Column(TIMESTAMP, server_default=func.now())
     notes         = Column(Text)
 
@@ -40,7 +42,7 @@ class Article(Base):
     __tablename__ = "articles"
 
     id                = Column(Integer, primary_key=True, autoincrement=True)
-    magazine_id       = Column(Integer, ForeignKey("magazines.id"), nullable=False)
+    magazine_id       = Column(Integer, ForeignKey("magazines.id", ondelete="CASCADE"), nullable=False)
     title             = Column(String, nullable=False)
     author            = Column(String)
     page_start        = Column(Integer)

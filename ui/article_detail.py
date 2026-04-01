@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QHBoxLayout, QVBoxLayout, QLabel,
     QSpinBox,
 )
-from PyQt6.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal, Qt
 
 from database.db import get_session
 from database.models import Article
@@ -31,7 +31,8 @@ class StarRating(QWidget):
         layout.setSpacing(2)
         for i in range(1, 6):
             lbl = QLabel("☆")
-            lbl.setStyleSheet("font-size: 18px; cursor: pointer;")
+            lbl.setStyleSheet("font-size: 18px;")
+            lbl.setCursor(Qt.CursorShape.PointingHandCursor)
             # Capture loop variable
             lbl.mousePressEvent = lambda _, n=i: self._set(n)
             layout.addWidget(lbl)

@@ -7,6 +7,9 @@ Handles AI confirmation prompts via a thread-safe signal/slot mechanism.
 
 from __future__ import annotations
 
+import logging
+import os
+
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QLabel, QProgressBar,
@@ -14,8 +17,20 @@ from PyQt6.QtWidgets import (
     QMessageBox,
 )
 
+import config
 from database.db import get_setting
 from core.scanner import scan_directory, import_magazine
+
+# Live log — written immediately so it survives hangs/crashes
+_LOG_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "import.log")
+logging.basicConfig(
+    filename=_LOG_PATH,
+    filemode="w",          # overwrite each run
+    level=logging.DEBUG,
+    format="%(asctime)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+_log = logging.getLogger("importer")
 
 
 class _ImportWorker(QThread):
@@ -40,14 +55,22 @@ class _ImportWorker(QThread):
     def respond_ai(self, yes: bool):
         self._ai_response = yes
 
+    def _emit(self, msg: str):
+        """Emit a progress message and write it to the log file immediately."""
+        _log.info(msg)
+        self.progress.emit(msg)
+
     def run(self):
+        _log.info("=== Import started ===")
         try:
             new_pdfs = scan_directory(self._folder)
         except Exception as e:
+            _log.error(f"scan_directory failed: {e}")
             self.error.emit(str(e))
             return
 
         total = len(new_pdfs)
+        _log.info(f"New PDFs found: {total}")
         new_magazines = 0
         new_articles = 0
         api_key = get_setting("anthropic_api_key", "")
@@ -57,10 +80,12 @@ class _ImportWorker(QThread):
 
         for i, pdf_path in enumerate(new_pdfs):
             if self._cancelled:
+                _log.info("Import cancelled by user.")
                 break
 
-            import os
-            self.pdf_started.emit(os.path.basename(pdf_path), i + 1, total)
+            filename = os.path.basename(pdf_path)
+            _log.info(f"--- Starting {filename} ({i+1}/{total}) ---")
+            self.pdf_started.emit(filename, i + 1, total)
 
             def confirm_ai(filename: str) -> bool:
                 if self._ai_yes_to_all:
@@ -69,7 +94,6 @@ class _ImportWorker(QThread):
                     return False
                 self._ai_response = None
                 self.ai_confirm_needed.emit(filename)
-                # Block until main thread responds
                 while self._ai_response is None:
                     self.msleep(50)
                 return self._ai_response
@@ -77,7 +101,7 @@ class _ImportWorker(QThread):
             try:
                 mag = import_magazine(
                     pdf_path,
-                    progress_callback=lambda msg: self.progress.emit(msg),
+                    progress_callback=self._emit,
                     ocr_dpi=dpi,
                     confidence_threshold=threshold,
                     api_key=api_key or None,
@@ -85,11 +109,15 @@ class _ImportWorker(QThread):
                     ai_confirm_callback=confirm_ai if ask else None,
                 )
                 new_magazines += 1
-                new_articles += len(mag.articles)
-                self.pdf_done.emit(os.path.basename(pdf_path))
+                new_articles += mag.article_count
+                _log.info(f"✓ Done: {filename}  (offset={mag.page_offset})")
+                self.pdf_done.emit(filename)
             except Exception as e:
-                self.progress.emit(f"ERROR importing {os.path.basename(pdf_path)}: {e}")
+                msg = f"ERROR importing {filename}: {e}"
+                _log.exception(msg)
+                self.progress.emit(msg)
 
+        _log.info(f"=== Import finished: {new_magazines} magazines, {new_articles} articles ===")
         self.finished.emit(new_magazines, new_articles)
 
 

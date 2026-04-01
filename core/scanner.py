@@ -18,13 +18,17 @@ import re
 from typing import Callable, Optional
 
 import fitz  # PyMuPDF
+import pytesseract
+from PIL import Image
+from io import BytesIO
 
 import config
 from database.db import get_session
 from database.models import Magazine, Article
-from core.toc_parser import parse_toc, has_text_layer
+from core.toc_parser import parse_toc, has_text_layer, find_toc_pages
 from core.ocr_engine import render_page_to_image
 from core.ai_extractor import extract_toc_with_ai
+from core.wfc_index_parser import parse_wfc_index
 
 
 def scan_directory(folder_path: str) -> list[str]:
@@ -65,22 +69,28 @@ def _extract_cover_thumbnail(pdf_path: str) -> bytes:
 
 def _guess_metadata_from_filename(pdf_path: str) -> dict:
     """
-    Attempt to extract title, volume, issue number, season, and year from the
-    file name. Returns a dict with any fields that could be identified.
+    Attempt to extract title, volume, issue number, season, year, and publication
+    from the file name. Returns a dict with any fields that could be identified.
 
     Example filenames this handles:
-        WildfowlCarving_Vol5_No2_Spring2003.pdf
-        WoodCarving_Issue12_2005.pdf
+        2012-2 Wildfowl Carving.pdf          → publication="Wildfowl Carving"
+        WCI99 Issue.pdf                      → publication="Woodcarving Illustrated"
+        WildfowlCarving_Vol5_No2_Spring2003  → publication="Wildfowl Carving"
     """
     name = os.path.splitext(os.path.basename(pdf_path))[0]
     meta: dict = {"title": name, "volume": None, "issue_number": None,
-                  "season": None, "year": None}
+                  "season": None, "year": None, "publication": None}
 
     if m := re.search(r"[Vv]ol(?:ume)?[\s_-]*(\d+)", name):
         meta["volume"] = int(m.group(1))
 
-    if m := re.search(r"[Nn]o\.?[\s_-]*(\d+)|[Ii]ssue[\s_-]*(\d+)", name):
-        meta["issue_number"] = int(m.group(1) or m.group(2))
+    if m := re.search(
+        r"[Nn]o\.?[\s_-]*(\d+)"        # No. 12 / No12
+        r"|[Ii]ssue[\s_-]*(\d+)"        # Issue 12 / Issue12
+        r"|[Ww][Cc][Ii][\s_-]?(\d+)",   # WCI99 / wci 99
+        name,
+    ):
+        meta["issue_number"] = int(m.group(1) or m.group(2) or m.group(3))
 
     for season in ("Spring", "Summer", "Fall", "Autumn", "Winter"):
         if season.lower() in name.lower():
@@ -89,6 +99,25 @@ def _guess_metadata_from_filename(pdf_path: str) -> dict:
 
     if m := re.search(r"(19|20)\d{2}", name):
         meta["year"] = int(m.group(0))
+
+    # --- Publication detection ---
+    # WCI prefix → Woodcarving Illustrated
+    if re.match(r"[Ww][Cc][Ii]\d", name) or re.match(r"[Ww][Cc][Ii]\s", name):
+        meta["publication"] = "Woodcarving Illustrated"
+    # "Wildfowl" anywhere in name → Wildfowl Carving
+    elif re.search(r"[Ww]ildfowl", name):
+        meta["publication"] = "Wildfowl Carving"
+    else:
+        # Strip leading "YYYY-N " date prefix to get the publication name
+        # e.g. "2012-2 Wildfowl Carving" → "Wildfowl Carving"
+        cleaned = re.sub(r"^\d{4}-\d+\s+", "", name).strip()
+        # Replace underscores with spaces and strip trailing parentheticals/numbers
+        cleaned = cleaned.replace("_", " ")
+        cleaned = re.sub(r"\s*\(\d+\)\s*$", "", cleaned).strip()  # e.g. "(2)" suffix
+        if cleaned and cleaned != name.replace("_", " "):
+            meta["publication"] = cleaned
+        else:
+            meta["publication"] = cleaned or name
 
     return meta
 
@@ -103,6 +132,77 @@ def _auto_keywords(title: str) -> str:
     words = re.findall(r"[A-Za-z]{3,}", title)
     keywords = [w.lower() for w in words if w.lower() not in STOPWORDS]
     return ", ".join(dict.fromkeys(keywords))  # deduplicated, order-preserved
+
+
+def _detect_page_offset(
+    pdf_path: str,
+    toc_pages: list[int],
+    has_text: bool,
+    dpi: int = 100,
+) -> int:
+    """
+    Scan pages after the TOC to find the first printed page number, then
+    return page_offset = (PDF page index) - (printed page number) + 1.
+
+    This accounts for unnumbered pages (cover, inside cover, ads) that appear
+    before the magazine's page 1.  Returns 0 if detection fails.
+    """
+    # Page number regex: a standalone 1-3 digit integer, not part of a longer number
+    _PAGE_NUM_RE = re.compile(r'(?<!\d)(\d{1,3})(?!\d)')
+
+    doc = fitz.open(pdf_path)
+    try:
+        start = max(1, max(toc_pages) + 1) if toc_pages else 1
+        limit = min(start + 10, doc.page_count)
+
+        for i in range(start, limit):
+            page = doc[i]
+            h = page.rect.height
+            w = page.rect.width
+            found_num = None
+
+            if has_text:
+                # Text layer: look for standalone integers in the top/bottom 12%
+                for word in page.get_text("words"):
+                    # word = (x0, y0, x1, y1, text, block, line, word_index)
+                    x0, y0, x1, y1, text = word[:5]
+                    if y1 < h * 0.12 or y0 > h * 0.88:
+                        text = text.strip()
+                        if re.fullmatch(r'\d{1,3}', text):
+                            candidate = int(text)
+                            if 1 <= candidate <= 100:
+                                found_num = candidate
+                                break
+            else:
+                # Image scan: OCR just the top and bottom strips (fast)
+                zoom = dpi / 72.0
+                mat = fitz.Matrix(zoom, zoom)
+                for clip in [
+                    fitz.Rect(0, 0,        w, h * 0.12),   # top strip
+                    fitz.Rect(0, h * 0.88, w, h),           # bottom strip
+                ]:
+                    pix = page.get_pixmap(matrix=mat, clip=clip)
+                    img = Image.open(BytesIO(pix.tobytes("png")))
+                    text = pytesseract.image_to_string(img, config="--psm 6 --oem 1 -c tessedit_do_invert=0", timeout=5)
+                    for tok in _PAGE_NUM_RE.findall(text):
+                        candidate = int(tok)
+                        if 1 <= candidate <= 100:
+                            found_num = candidate
+                            break
+                    if found_num is not None:
+                        break
+
+            if found_num is not None:
+                offset = i - found_num + 1
+                if offset >= 0:
+                    return offset
+
+    except Exception:
+        pass
+    finally:
+        doc.close()
+
+    return 0
 
 
 def import_magazine(
@@ -153,13 +253,21 @@ def import_magazine(
 
     # --- Metadata ---
     meta = _guess_metadata_from_filename(pdf_path)
+    if not meta["season"]:
+        meta["season"] = _detect_season_from_pdf(pdf_path)
     _progress("Guessed metadata from filename.")
 
     # --- TOC extraction ---
     _progress("Detecting text layer…")
+    text_layer = has_text_layer(pdf_path)
     articles_data, confidence = parse_toc(pdf_path, dpi=ocr_dpi,
                                           confidence_threshold=confidence_threshold)
-    extraction_method = "pdf_text" if has_text_layer(pdf_path) else "ocr"
+    extraction_method = "pdf_text" if text_layer else "ocr"
+
+    # --- Page offset detection ---
+    _progress("Detecting page offset…")
+    toc_pages = find_toc_pages(pdf_path, text_layer, ocr_dpi)
+    page_offset = _detect_page_offset(pdf_path, toc_pages, text_layer)
 
     # --- AI fallback ---
     if (confidence < confidence_threshold or len(articles_data) < 3) and api_key:
@@ -169,8 +277,8 @@ def import_magazine(
 
         if use_ai:
             _progress("Running AI extraction (Claude Haiku)…")
-            from core.toc_parser import find_toc_pages
-            toc_pages = find_toc_pages(pdf_path, has_text_layer(pdf_path), ocr_dpi)
+            if not toc_pages:
+                toc_pages = find_toc_pages(pdf_path, text_layer, ocr_dpi)
             if toc_pages:
                 # Use 150 DPI for AI — high enough to read, stays under 5MB API limit
                 page_image = render_page_to_image(pdf_path, toc_pages[0], dpi=150)
@@ -205,9 +313,11 @@ def import_magazine(
             issue_number=meta["issue_number"],
             season=meta["season"],
             year=meta["year"],
+            publication=meta.get("publication"),
             pdf_path=pdf_path,
             page_count=page_count,
             cover_image=cover_bytes,
+            page_offset=page_offset,
         )
         session.add(magazine)
         session.flush()  # get magazine.id before adding articles
@@ -224,8 +334,202 @@ def import_magazine(
             session.add(article)
 
         session.commit()
-        _progress(f"Imported {len(articles_data)} articles.")
+        article_count = len(articles_data)
+        _progress(f"Imported {article_count} articles.")
+
+        # Reconcile with any existing virtual (index-only) records
+        _reconcile_with_index(session, magazine, articles_data)
+
+        magazine.article_count = article_count  # transient convenience attr for caller
         return magazine
+
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def _normalize_title(title: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — for fuzzy title matching."""
+    t = title.lower()
+    t = re.sub(r"[^\w\s]", " ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _detect_season_from_pdf(pdf_path: str) -> str | None:
+    """
+    Scan the first 6 pages of a PDF for season keywords and return the season name,
+    or None if not found.
+    """
+    seasons = ("Winter", "Spring", "Summer", "Fall", "Autumn")
+    doc = fitz.open(pdf_path)
+    try:
+        limit = min(6, doc.page_count)
+        for i in range(limit):
+            text = doc[i].get_text("text").lower()
+            for season in seasons:
+                if season.lower() in text:
+                    return season if season != "Autumn" else "Fall"
+    except Exception:
+        pass
+    finally:
+        doc.close()
+    return None
+
+
+def _reconcile_with_index(session, magazine: Magazine, articles_data: list[dict]):
+    """
+    After importing a real PDF, find any virtual (index-only) Magazine records
+    for the same publication+season+year and fill in page_start for matching articles.
+    """
+    if not magazine.publication or not magazine.season or not magazine.year:
+        return
+
+    try:
+        virtual_mags = (
+            session.query(Magazine)
+            .filter(
+                Magazine.publication == magazine.publication,
+                Magazine.season == magazine.season,
+                Magazine.year == magazine.year,
+                Magazine.pdf_path.is_(None),
+            )
+            .all()
+        )
+
+        if not virtual_mags:
+            return
+
+        # Build a lookup: normalized title → page_number from the real PDF's articles
+        real_lookup: dict[str, int] = {}
+        for art in articles_data:
+            title = art.get("title", "")
+            page_num = art.get("page_number")
+            if title and page_num is not None:
+                real_lookup[_normalize_title(title)] = page_num
+
+        if not real_lookup:
+            return
+
+        updated = 0
+        for vmag in virtual_mags:
+            for varticle in vmag.articles:
+                if varticle.page_start is None:
+                    norm = _normalize_title(varticle.title)
+                    if norm in real_lookup:
+                        varticle.page_start = real_lookup[norm]
+                        updated += 1
+
+        if updated:
+            session.commit()
+
+    except Exception:
+        pass  # reconciliation is best-effort
+
+
+def import_index(
+    index_pdf_path: str,
+    publication: str,
+    progress_callback=None,
+) -> int:
+    """
+    Import a master index PDF (like Wildfowl_Carving_TOC_All_Issues.pdf).
+
+    Creates virtual Magazine records (pdf_path=None) and Article records
+    (page_start=None, extraction_method="index") for issues not already in the DB.
+
+    Returns the number of new articles created.
+    """
+    def _progress(msg: str):
+        if progress_callback:
+            progress_callback(msg)
+
+    _progress(f"Parsing index PDF: {os.path.basename(index_pdf_path)}…")
+    entries = parse_wfc_index(index_pdf_path)
+    _progress(f"Found {len(entries)} articles in index.")
+
+    # Group by (season, year)
+    from collections import defaultdict
+    groups: dict[tuple, list[dict]] = defaultdict(list)
+    for entry in entries:
+        groups[(entry["season"], entry["year"])].append(entry)
+
+    session = get_session()
+    total_new_articles = 0
+
+    try:
+        for (season, year), articles in sorted(groups.items(), key=lambda x: (x[0][1], x[0][0])):
+            _progress(f"Processing {season} {year} ({len(articles)} articles)…")
+
+            # Check if a real PDF record already exists for this issue
+            real_mag = (
+                session.query(Magazine)
+                .filter(
+                    Magazine.publication == publication,
+                    Magazine.season == season,
+                    Magazine.year == year,
+                    Magazine.pdf_path.isnot(None),
+                )
+                .first()
+            )
+
+            # Check if a virtual record already exists
+            virtual_mag = (
+                session.query(Magazine)
+                .filter(
+                    Magazine.publication == publication,
+                    Magazine.season == season,
+                    Magazine.year == year,
+                    Magazine.pdf_path.is_(None),
+                )
+                .first()
+            )
+
+            if real_mag:
+                # Real PDF exists — try to reconcile page numbers for index articles
+                real_articles_data = [
+                    {
+                        "title": a.title,
+                        "author": a.author,
+                        "page_number": a.page_start,
+                    }
+                    for a in real_mag.articles
+                ]
+                _reconcile_with_index(session, real_mag, real_articles_data)
+                continue
+
+            if virtual_mag:
+                # Virtual record already exists — skip
+                continue
+
+            # Create virtual Magazine record
+            mag = Magazine(
+                title=publication,
+                publication=publication,
+                season=season,
+                year=year,
+                pdf_path=None,
+            )
+            session.add(mag)
+            session.flush()
+
+            for art in articles:
+                article = Article(
+                    magazine_id=mag.id,
+                    title=art["title"],
+                    author=art.get("author"),
+                    page_start=None,
+                    keywords=_auto_keywords(art["title"]),
+                    extraction_method="index",
+                )
+                session.add(article)
+                total_new_articles += 1
+
+        session.commit()
+        _progress(f"Done. {total_new_articles} new articles imported.")
+        return total_new_articles
 
     except Exception:
         session.rollback()
