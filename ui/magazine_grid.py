@@ -156,6 +156,7 @@ class MagazineGrid(QWidget):
         filter_row.addWidget(QLabel("Owned:"))
         self._owned_filter = QComboBox()
         self._owned_filter.addItems(["All", "Owned", "Not Owned"])
+        self._owned_filter.setCurrentIndex(1)  # default to Owned
         self._owned_filter.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._owned_filter.currentIndexChanged.connect(self._apply_filter)
         filter_row.addWidget(self._owned_filter)
