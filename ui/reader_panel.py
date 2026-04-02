@@ -15,7 +15,7 @@ from __future__ import annotations
 from collections import OrderedDict
 
 import fitz  # PyMuPDF
-from PyQt6.QtCore import Qt, QByteArray
+from PyQt6.QtCore import Qt, QByteArray, QPoint, QEvent
 from PyQt6.QtGui import QPixmap, QWheelEvent
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
@@ -24,7 +24,7 @@ from PyQt6.QtWidgets import (
 
 import config
 from database.db import get_session
-from database.models import Article
+from database.models import Article, Magazine
 
 
 ZOOM_STEPS = [0.25, 0.50, 0.75, 1.0, 1.25, 1.50, 2.0]
@@ -39,6 +39,9 @@ class ReaderPanel(QWidget):
         self._current_page = 0
         self._zoom_index = DEFAULT_ZOOM_INDEX
         self._page_cache: OrderedDict[tuple[str, int, float], QPixmap] = OrderedDict()
+        self._pan_active = False
+        self._pan_start_pos = QPoint()
+        self._pan_start_scroll = QPoint()
         self._build_ui()
 
     def _build_ui(self):
@@ -104,6 +107,10 @@ class ReaderPanel(QWidget):
 
         layout.addWidget(self._scroll)
 
+        # Install event filter on the viewport for grab/pan
+        self._scroll.viewport().installEventFilter(self)
+        self._scroll.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+
     # --- Public API ---
 
     def open_article(self, article_id: int):
@@ -127,6 +134,26 @@ class ReaderPanel(QWidget):
             return
 
         self.open_pdf(pdf_path, max(0, page_start))
+
+    def open_magazine(self, mag_id: int):
+        """Open the PDF for a magazine at page 0 (used when selecting from the grid)."""
+        session = get_session()
+        try:
+            mag = session.get(Magazine, mag_id)
+            if mag is None:
+                return
+            pdf_path = mag.pdf_path
+        finally:
+            session.close()
+
+        if not pdf_path:
+            self._page_label.setText(
+                "No PDF available for this issue.\nThis is a catalog-only entry."
+            )
+            self._page_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            return
+
+        self.open_pdf(pdf_path, 0)
 
     def open_pdf(self, pdf_path: str, page_num: int = 0):
         """Open a PDF file and display the specified page (0-indexed)."""
@@ -231,6 +258,37 @@ class ReaderPanel(QWidget):
         self._page_label.resize(pixmap.size())
         self._page_input.setText(str(self._current_page + 1))
         self._zoom_label.setText(f"{int(zoom * 100)}%")
+
+    def eventFilter(self, obj, event):
+        """Handle grab/pan on the scroll area viewport."""
+        if obj is self._scroll.viewport():
+            etype = event.type()
+            if etype == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._pan_active = True
+                    self._pan_start_pos = event.globalPosition().toPoint()
+                    self._pan_start_scroll = QPoint(
+                        self._scroll.horizontalScrollBar().value(),
+                        self._scroll.verticalScrollBar().value(),
+                    )
+                    self._scroll.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+                    return True
+            elif etype == QEvent.Type.MouseMove:
+                if self._pan_active:
+                    delta = event.globalPosition().toPoint() - self._pan_start_pos
+                    self._scroll.horizontalScrollBar().setValue(
+                        self._pan_start_scroll.x() - delta.x()
+                    )
+                    self._scroll.verticalScrollBar().setValue(
+                        self._pan_start_scroll.y() - delta.y()
+                    )
+                    return True
+            elif etype == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._pan_active = False
+                    self._scroll.viewport().setCursor(Qt.CursorShape.OpenHandCursor)
+                    return True
+        return super().eventFilter(obj, event)
 
     def wheelEvent(self, event: QWheelEvent):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

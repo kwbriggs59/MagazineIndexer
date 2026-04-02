@@ -41,9 +41,10 @@ class _ImportWorker(QThread):
     ai_confirm_needed = pyqtSignal(str) # filename — worker blocks until responded
     error = pyqtSignal(str)
 
-    def __init__(self, folder: str, parent=None):
+    def __init__(self, folder: str, parent=None, pdf_paths: list[str] | None = None):
         super().__init__(parent)
         self._folder = folder
+        self._pdf_paths = pdf_paths  # if set, skip scan_directory and use these directly
         self._cancelled = False
         self._ai_response: bool | None = None
         self._ai_yes_to_all = False
@@ -62,12 +63,16 @@ class _ImportWorker(QThread):
 
     def run(self):
         _log.info("=== Import started ===")
-        try:
-            new_pdfs = scan_directory(self._folder)
-        except Exception as e:
-            _log.error(f"scan_directory failed: {e}")
-            self.error.emit(str(e))
-            return
+        if self._pdf_paths is not None:
+            new_pdfs = self._pdf_paths
+            _log.info(f"Re-importing {len(new_pdfs)} specific PDF(s).")
+        else:
+            try:
+                new_pdfs = scan_directory(self._folder)
+            except Exception as e:
+                _log.error(f"scan_directory failed: {e}")
+                self.error.emit(str(e))
+                return
 
         total = len(new_pdfs)
         _log.info(f"New PDFs found: {total}")
@@ -122,12 +127,13 @@ class _ImportWorker(QThread):
 
 
 class ImportDialog(QDialog):
-    def __init__(self, folder: str, parent=None):
+    def __init__(self, folder: str, parent=None, pdf_paths: list[str] | None = None):
         super().__init__(parent)
-        self.setWindowTitle("Scanning for New Issues")
+        self.setWindowTitle("Re-importing Issue" if pdf_paths else "Scanning for New Issues")
         self.setModal(True)
         self.resize(560, 400)
         self._folder = folder
+        self._pdf_paths = pdf_paths
         self._worker: _ImportWorker | None = None
         self._build_ui()
         self._start()
@@ -175,7 +181,7 @@ class ImportDialog(QDialog):
         layout.addWidget(self._cancel_btn, alignment=Qt.AlignmentFlag.AlignRight)
 
     def _start(self):
-        self._worker = _ImportWorker(self._folder, self)
+        self._worker = _ImportWorker(self._folder, self, pdf_paths=self._pdf_paths)
         self._worker.progress.connect(self._on_progress)
         self._worker.pdf_started.connect(self._on_pdf_started)
         self._worker.pdf_done.connect(self._on_pdf_done)

@@ -15,7 +15,7 @@ from __future__ import annotations
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTreeWidget, QTreeWidgetItem,
     QMenu, QComboBox, QCheckBox, QHBoxLayout, QLabel,
-    QInputDialog,
+    QInputDialog, QMessageBox,
 )
 from PyQt6.QtCore import pyqtSignal, Qt
 from PyQt6.QtGui import QAction
@@ -26,7 +26,9 @@ from ui.article_detail import ArticleDetail
 
 
 class LibraryPanel(QWidget):
-    article_selected = pyqtSignal(int)  # article_id
+    article_selected = pyqtSignal(int)   # article_id
+    reimport_requested = pyqtSignal(str) # pdf_path
+    magazine_deleted = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -179,6 +181,16 @@ class LibraryPanel(QWidget):
             offset_action.triggered.connect(lambda: self._set_page_offset(mag_id))
             menu.addAction(offset_action)
 
+            reimport_action = QAction("Re-import Issue…", self)
+            reimport_action.triggered.connect(lambda: self._reimport_magazine(mag_id))
+            menu.addAction(reimport_action)
+
+            menu.addSeparator()
+
+            delete_action = QAction("Delete Issue…", self)
+            delete_action.triggered.connect(lambda: self._delete_magazine(mag_id))
+            menu.addAction(delete_action)
+
         elif data[0] == "article":
             article_id = data[1]
 
@@ -235,4 +247,81 @@ class LibraryPanel(QWidget):
             session.commit()
         finally:
             session.close()
+        self.refresh()
+
+    def _delete_magazine(self, mag_id: int):
+        session = get_session()
+        try:
+            mag = session.get(Magazine, mag_id)
+            if mag is None:
+                return
+            label = " — ".join(filter(None, [
+                mag.publication, mag.season, str(mag.year) if mag.year else None
+            ])) or mag.title
+        finally:
+            session.close()
+
+        reply = QMessageBox.question(
+            self,
+            "Delete Issue",
+            f"Delete '{label}' and all its articles from the library?\n\nThis does not delete the PDF file.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        session = get_session()
+        try:
+            mag = session.get(Magazine, mag_id)
+            if mag:
+                session.query(Article).filter(Article.magazine_id == mag_id).delete()
+                session.delete(mag)
+                session.commit()
+        finally:
+            session.close()
+
+        self.magazine_deleted.emit()
+        self.refresh()
+
+    def _reimport_magazine(self, mag_id: int):
+        session = get_session()
+        try:
+            mag = session.get(Magazine, mag_id)
+            if mag is None:
+                return
+            pdf_path = mag.pdf_path
+            label = " — ".join(filter(None, [
+                mag.publication, mag.season, str(mag.year) if mag.year else None
+            ])) or mag.title
+        finally:
+            session.close()
+
+        if not pdf_path:
+            QMessageBox.information(
+                self,
+                "Catalog-Only Entry",
+                "This is a catalog-only entry with no PDF. Nothing to re-import.",
+            )
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Re-import Issue",
+            f"Re-import '{label}'?\n\nThe existing record and articles will be deleted and re-extracted from the PDF.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        session = get_session()
+        try:
+            mag = session.get(Magazine, mag_id)
+            if mag:
+                session.query(Article).filter(Article.magazine_id == mag_id).delete()
+                session.delete(mag)
+                session.commit()
+        finally:
+            session.close()
+
+        self.reimport_requested.emit(pdf_path)
         self.refresh()
