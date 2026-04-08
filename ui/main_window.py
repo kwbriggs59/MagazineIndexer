@@ -80,6 +80,11 @@ class MainWindow(QMainWindow):
         wci_index_btn.clicked.connect(self._on_wci_index)
         row2.addWidget(wci_index_btn)
 
+        add_doc_btn = QPushButton("Add Book/Article…")
+        add_doc_btn.setToolTip("Import a PDF book or individual article into the library")
+        add_doc_btn.clicked.connect(self._on_add_document)
+        row2.addWidget(add_doc_btn)
+
         idx_btn = QPushButton("Import Index…")
         idx_btn.setToolTip("Import a master index PDF to populate article catalog without PDFs")
         idx_btn.clicked.connect(self._on_import_index)
@@ -155,6 +160,12 @@ class MainWindow(QMainWindow):
         self._wci_index_window.raise_()
         self._wci_index_window.activateWindow()
 
+    def _on_add_document(self):
+        from ui.add_document_dialog import AddDocumentDialog
+        dlg = AddDocumentDialog(self)
+        if dlg.exec() == AddDocumentDialog.DialogCode.Accepted:
+            self._magazine_grid.refresh()
+
     def _on_import_index(self):
         from PyQt6.QtWidgets import QInputDialog
         path, _ = QFileDialog.getOpenFileName(
@@ -196,7 +207,6 @@ class MainWindow(QMainWindow):
     def _on_back(self):
         """Return to the magazine grid home screen."""
         self._stack.setCurrentIndex(0)
-        self._magazine_grid.refresh()
 
     def _on_search_article_selected(self, article_id: int):
         """Open reader mode for the magazine that owns the searched article."""

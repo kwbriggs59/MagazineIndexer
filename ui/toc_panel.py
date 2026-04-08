@@ -3,7 +3,6 @@ TOC Panel — left panel shown when a magazine is open in the reader.
 
 Displays the table of contents for a single magazine issue.
 Clicking an article row navigates the PDF viewer to that page.
-Right-clicking the header shows "Set Page Offset…".
 
 Signals:
     article_selected(article_id: int) — user clicked an article
@@ -18,11 +17,14 @@ from PyQt6.QtGui import QAction
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLabel,
     QListWidget, QListWidgetItem, QMenu, QInputDialog, QSplitter,
+    QMessageBox,
 )
 
 from database.db import get_session
 from database.models import Magazine, Article
 from ui.article_detail import ArticleDetail
+
+
 
 
 class TocPanel(QWidget):
@@ -46,24 +48,43 @@ class TocPanel(QWidget):
         back_btn.clicked.connect(self.back_requested)
         top_row.addWidget(back_btn)
         top_row.addStretch()
+        add_btn = QPushButton("+")
+        add_btn.setFixedWidth(28)
+        add_btn.setToolTip("Add article")
+        add_btn.clicked.connect(self._add_article)
+        top_row.addWidget(add_btn)
         layout.addLayout(top_row)
 
-        # Issue label — right-click for "Set Page Offset"
+        # Issue label
         self._issue_label = QLabel()
         self._issue_label.setWordWrap(True)
         self._issue_label.setStyleSheet("font-weight: bold; padding: 2px 0;")
-        self._issue_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._issue_label.customContextMenuRequested.connect(self._on_header_context_menu)
         layout.addWidget(self._issue_label)
+
+        # Page offset row
+        offset_row = QHBoxLayout()
+        self._offset_label = QLabel("Page offset: —")
+        self._offset_label.setStyleSheet("font-size: 11px; color: #888;")
+        offset_row.addWidget(self._offset_label)
+        offset_row.addStretch()
+        offset_btn = QPushButton("Edit")
+        offset_btn.setFixedWidth(40)
+        offset_btn.setToolTip("Set page offset for this issue")
+        offset_btn.clicked.connect(self._set_page_offset)
+        offset_row.addWidget(offset_btn)
+        layout.addLayout(offset_row)
 
         # Article list + detail panel in a vertical splitter
         splitter = QSplitter(Qt.Orientation.Vertical)
 
         self._list = QListWidget()
         self._list.itemClicked.connect(self._on_item_clicked)
+        self._list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._list.customContextMenuRequested.connect(self._on_article_context_menu)
         splitter.addWidget(self._list)
 
         self._detail = ArticleDetail()
+        self._detail.article_changed.connect(self._on_article_changed)
         splitter.addWidget(self._detail)
 
         splitter.setSizes([300, 250])
@@ -84,6 +105,7 @@ class TocPanel(QWidget):
             parts = [p for p in [mag.publication or mag.title, mag.season,
                                   str(mag.year) if mag.year else None] if p]
             self._issue_label.setText(" — ".join(parts))
+            self._offset_label.setText(f"Page offset: {mag.page_offset or 0}")
 
             articles = sorted(
                 mag.articles,
@@ -106,14 +128,73 @@ class TocPanel(QWidget):
             self._detail.load_article(article_id)
             self.article_selected.emit(article_id)
 
-    def _on_header_context_menu(self, pos):
+    def _on_article_context_menu(self, pos):
+        item = self._list.itemAt(pos)
+        if item is None:
+            return
+        article_id = item.data(Qt.ItemDataRole.UserRole)
+        menu = QMenu(self)
+        delete_action = QAction("Delete Article", self)
+        delete_action.triggered.connect(lambda: self._delete_article(article_id))
+        menu.addAction(delete_action)
+        menu.exec(self._list.mapToGlobal(pos))
+
+    def _add_article(self):
         if self._mag_id is None:
             return
-        menu = QMenu(self)
-        action = QAction("Set Page Offset…", self)
-        action.triggered.connect(self._set_page_offset)
-        menu.addAction(action)
-        menu.exec(self._issue_label.mapToGlobal(pos))
+        session = get_session()
+        try:
+            article = Article(
+                magazine_id=self._mag_id,
+                title="New Article",
+                extraction_method="manual",
+            )
+            session.add(article)
+            session.commit()
+            new_id = article.id
+        finally:
+            session.close()
+        self.load_magazine(self._mag_id)
+        for i in range(self._list.count()):
+            item = self._list.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == new_id:
+                self._list.setCurrentItem(item)
+                self._detail.load_article(new_id)
+                break
+
+    def _delete_article(self, article_id: int):
+        reply = QMessageBox.question(
+            self, "Delete Article",
+            "Remove this article from the TOC?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        session = get_session()
+        try:
+            article = session.get(Article, article_id)
+            if article:
+                session.delete(article)
+                session.commit()
+        finally:
+            session.close()
+        self._detail.setEnabled(False)
+        self.load_magazine(self._mag_id)
+
+    def _on_article_changed(self):
+        """Refresh the list text after an article is edited and saved."""
+        if self._mag_id is not None:
+            current_id = None
+            current = self._list.currentItem()
+            if current:
+                current_id = current.data(Qt.ItemDataRole.UserRole)
+            self.load_magazine(self._mag_id)
+            if current_id is not None:
+                for i in range(self._list.count()):
+                    item = self._list.item(i)
+                    if item.data(Qt.ItemDataRole.UserRole) == current_id:
+                        self._list.setCurrentItem(item)
+                        break
 
     def _set_page_offset(self):
         if self._mag_id is None:
@@ -144,3 +225,4 @@ class TocPanel(QWidget):
                 session.commit()
         finally:
             session.close()
+        self._offset_label.setText(f"Page offset: {value}")

@@ -31,6 +31,8 @@ class Magazine(Base):
     date_imported = Column(TIMESTAMP, server_default=func.now())
     notes         = Column(Text)
 
+    content_type  = Column(String, default="magazine")  # "magazine" | "book" | "article"
+
     articles = relationship("Article", back_populates="magazine",
                             cascade="all, delete-orphan")
 

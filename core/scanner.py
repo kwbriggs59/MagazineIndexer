@@ -350,6 +350,155 @@ def import_magazine(
         session.close()
 
 
+def import_book(
+    pdf_path: str,
+    title: str,
+    author: str | None = None,
+    extract_toc: bool = True,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> Magazine:
+    """
+    Import a PDF book into the library.
+
+    If extract_toc is True, attempts to extract a table of contents and
+    creates Article records for each chapter found. The author parameter is
+    used as a fallback author on chapters that don't have one.
+
+    Returns the newly created Magazine ORM object.
+    """
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    def _progress(msg: str):
+        if progress_callback:
+            progress_callback(msg)
+
+    _progress(f"Opening {os.path.basename(pdf_path)}…")
+    doc = fitz.open(pdf_path)
+    page_count = doc.page_count
+    doc.close()
+
+    _progress("Extracting cover thumbnail…")
+    cover_bytes = _extract_cover_thumbnail(pdf_path)
+
+    articles_data: list[dict] = []
+    page_offset = 0
+    extraction_method = "manual"
+
+    if extract_toc:
+        _progress("Detecting text layer…")
+        text_layer = has_text_layer(pdf_path)
+        _progress("Extracting table of contents…")
+        articles_data, _ = parse_toc(pdf_path, dpi=config.DEFAULT_OCR_DPI,
+                                     confidence_threshold=config.DEFAULT_OCR_CONFIDENCE_THRESHOLD)
+        extraction_method = "pdf_text" if text_layer else "ocr"
+        if articles_data:
+            toc_pages = find_toc_pages(pdf_path, text_layer, config.DEFAULT_OCR_DPI)
+            page_offset = _detect_page_offset(pdf_path, toc_pages, text_layer)
+        _progress(f"Found {len(articles_data)} chapters.")
+
+    _progress("Writing to database…")
+    session = get_session()
+    try:
+        magazine = Magazine(
+            title=title,
+            publication=title,      # used as the display label in the grid
+            pdf_path=pdf_path,
+            page_count=page_count,
+            cover_image=cover_bytes,
+            page_offset=page_offset,
+            content_type="book",
+        )
+        session.add(magazine)
+        session.flush()
+
+        for art in articles_data:
+            article = Article(
+                magazine_id=magazine.id,
+                title=art.get("title", ""),
+                author=art.get("author") or author,
+                page_start=art.get("page_number"),
+                keywords=_auto_keywords(art.get("title", "")),
+                extraction_method=extraction_method,
+            )
+            session.add(article)
+
+        session.commit()
+        _progress(f"Imported book with {len(articles_data)} chapters.")
+        return magazine
+
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+def import_article(
+    pdf_path: str,
+    title: str,
+    author: str | None = None,
+    progress_callback: Optional[Callable[[str], None]] = None,
+) -> Magazine:
+    """
+    Import a single-article PDF into the library.
+
+    Creates one Magazine record (content_type="article") and one Article record
+    covering the entire document. The article is immediately openable in the reader.
+
+    Returns the newly created Magazine ORM object.
+    """
+    if not os.path.exists(pdf_path):
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+
+    def _progress(msg: str):
+        if progress_callback:
+            progress_callback(msg)
+
+    _progress(f"Opening {os.path.basename(pdf_path)}…")
+    doc = fitz.open(pdf_path)
+    page_count = doc.page_count
+    doc.close()
+
+    _progress("Extracting cover thumbnail…")
+    cover_bytes = _extract_cover_thumbnail(pdf_path)
+
+    _progress("Writing to database…")
+    session = get_session()
+    try:
+        magazine = Magazine(
+            title=title,
+            publication=title,      # used as the display label in the grid
+            pdf_path=pdf_path,
+            page_count=page_count,
+            cover_image=cover_bytes,
+            page_offset=0,
+            content_type="article",
+        )
+        session.add(magazine)
+        session.flush()
+
+        article = Article(
+            magazine_id=magazine.id,
+            title=title,
+            author=author,
+            page_start=1,
+            keywords=_auto_keywords(title),
+            extraction_method="manual",
+        )
+        session.add(article)
+
+        session.commit()
+        _progress("Article imported.")
+        return magazine
+
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 def _normalize_title(title: str) -> str:
     """Lowercase, strip punctuation, collapse whitespace — for fuzzy title matching."""
     t = title.lower()

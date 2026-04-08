@@ -108,6 +108,13 @@ def _migrate(engine):
         except Exception:
             pass  # column already exists
 
+        # magazines.content_type — distinguishes magazines, books, and individual articles
+        try:
+            conn.execute(text("ALTER TABLE magazines ADD COLUMN content_type TEXT DEFAULT 'magazine'"))
+            conn.commit()
+        except Exception:
+            pass  # column already exists
+
         # Clean up orphan articles left behind by bulk magazine deletes (bypassed ORM cascade)
         conn.execute(text(
             "DELETE FROM articles WHERE magazine_id NOT IN (SELECT id FROM magazines)"

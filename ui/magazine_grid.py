@@ -13,7 +13,7 @@ Signals:
 from __future__ import annotations
 
 from PyQt6.QtCore import pyqtSignal, Qt, QByteArray
-from PyQt6.QtGui import QPixmap, QAction
+from PyQt6.QtGui import QPixmap, QPixmapCache, QAction
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea, QGridLayout,
     QLabel, QComboBox, QFrame, QMenu, QMessageBox, QSizePolicy,
@@ -23,11 +23,19 @@ from database.db import get_session
 from database.models import Magazine, Article
 
 
+QPixmapCache.setCacheLimit(51200)  # 50 MB — ~500 covers at ~100 KB each
+
 CARD_W = 165
 CARD_H = 250
 THUMB_W = 150
 THUMB_H = 195
 COLS = 5
+
+
+_TYPE_BADGE: dict[str, tuple[str, str]] = {
+    "book":    ("BOOK",    "#4a9eed"),
+    "article": ("ARTICLE", "#e89040"),
+}
 
 
 class _MagazineCard(QFrame):
@@ -44,6 +52,7 @@ class _MagazineCard(QFrame):
         subtitle: str,
         cover_bytes: bytes | None,
         pdf_path: str | None,
+        content_type: str = "magazine",
         parent=None,
     ):
         super().__init__(parent)
@@ -51,6 +60,7 @@ class _MagazineCard(QFrame):
         self._pdf_path = pdf_path
 
         self.setFixedSize(CARD_W, CARD_H)
+        self._content_type = content_type
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -66,17 +76,32 @@ class _MagazineCard(QFrame):
         thumb.setFixedSize(THUMB_W, THUMB_H)
         thumb.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         if cover_bytes:
-            pixmap = QPixmap()
-            pixmap.loadFromData(QByteArray(cover_bytes), "PNG")
-            thumb.setPixmap(
-                pixmap.scaled(THUMB_W, THUMB_H,
-                              Qt.AspectRatioMode.KeepAspectRatio,
-                              Qt.TransformationMode.SmoothTransformation)
-            )
+            cache_key = f"cover_{mag_id}"
+            pixmap = QPixmapCache.find(cache_key)
+            if pixmap is None:
+                pixmap = QPixmap()
+                pixmap.loadFromData(QByteArray(cover_bytes), "PNG")
+                pixmap = pixmap.scaled(THUMB_W, THUMB_H,
+                                       Qt.AspectRatioMode.KeepAspectRatio,
+                                       Qt.TransformationMode.SmoothTransformation)
+                QPixmapCache.insert(cache_key, pixmap)
+            thumb.setPixmap(pixmap)
         else:
             thumb.setText("No Cover")
             thumb.setStyleSheet("background: #cccccc; color: #666666;")
         layout.addWidget(thumb)
+
+        # Type badge (books and articles only)
+        if content_type in _TYPE_BADGE:
+            badge_text, badge_color = _TYPE_BADGE[content_type]
+            badge_lbl = QLabel(badge_text)
+            badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            badge_lbl.setStyleSheet(
+                f"background: {badge_color}; color: white; "
+                "font-size: 8px; font-weight: bold; padding: 1px 0;"
+            )
+            layout.addWidget(badge_lbl)
 
         # Publication name
         pub_lbl = QLabel(publication)
@@ -161,6 +186,14 @@ class MagazineGrid(QWidget):
         self._owned_filter.currentIndexChanged.connect(self._apply_filter)
         filter_row.addWidget(self._owned_filter)
 
+        filter_row.addSpacing(16)
+        filter_row.addWidget(QLabel("Type:"))
+        self._type_filter = QComboBox()
+        self._type_filter.addItems(["All", "Magazines", "Books", "Articles"])
+        self._type_filter.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._type_filter.currentIndexChanged.connect(self._apply_filter)
+        filter_row.addWidget(self._type_filter)
+
         filter_row.addStretch()
         layout.addLayout(filter_row)
 
@@ -193,10 +226,14 @@ class MagazineGrid(QWidget):
                     "year": m.year,
                     "cover_image": m.cover_image,
                     "pdf_path": m.pdf_path,
+                    "content_type": m.content_type or "magazine",
                 }
                 for m in mags
             ]
-            pubs = sorted({m["publication"] for m in self._magazines if m["publication"]})
+            pubs = sorted({
+                m["publication"] for m in self._magazines
+                if m["publication"] and m["content_type"] == "magazine"
+            })
         finally:
             session.close()
 
@@ -216,6 +253,8 @@ class MagazineGrid(QWidget):
     def _apply_filter(self):
         pub = self._pub_filter.currentText()
         owned = self._owned_filter.currentText()
+        type_sel = self._type_filter.currentText()
+        _type_map = {"Magazines": "magazine", "Books": "book", "Articles": "article"}
         filtered = [
             m for m in self._magazines
             if (pub == "All" or m["publication"] == pub)
@@ -223,6 +262,10 @@ class MagazineGrid(QWidget):
                 owned == "All"
                 or (owned == "Owned" and m["pdf_path"] is not None)
                 or (owned == "Not Owned" and m["pdf_path"] is None)
+            )
+            and (
+                type_sel == "All"
+                or m["content_type"] == _type_map.get(type_sel, "magazine")
             )
         ]
         self._rebuild_grid(filtered)
@@ -242,13 +285,20 @@ class MagazineGrid(QWidget):
             return
 
         for idx, m in enumerate(magazines):
-            subtitle = " ".join(p for p in [m["season"], str(m["year"]) if m["year"] else None] if p)
+            ct = m["content_type"]
+            if ct == "magazine":
+                subtitle = " ".join(
+                    p for p in [m["season"], str(m["year"]) if m["year"] else None] if p
+                )
+            else:
+                subtitle = ""
             card = _MagazineCard(
                 mag_id=m["id"],
                 publication=m["publication"],
                 subtitle=subtitle,
                 cover_bytes=m["cover_image"],
                 pdf_path=m["pdf_path"],
+                content_type=ct,
             )
             card.clicked.connect(self.magazine_selected)
             card.reimport_requested.connect(self.reimport_requested)

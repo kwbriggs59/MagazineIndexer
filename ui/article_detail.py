@@ -12,7 +12,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QHBoxLayout, QVBoxLayout, QLabel,
     QSpinBox,
 )
-from PyQt6.QtCore import pyqtSignal, Qt
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer
 
 from database.db import get_session
 from database.models import Article
@@ -105,6 +105,11 @@ class ArticleDetail(QWidget):
         btn_row.addWidget(save_btn)
 
         layout.addLayout(btn_row)
+
+        self._status_label = QLabel("")
+        self._status_label.setStyleSheet("color: green; font-style: italic;")
+        layout.addWidget(self._status_label)
+
         self.setEnabled(False)
 
     def load_article(self, article_id: int):
@@ -132,6 +137,10 @@ class ArticleDetail(QWidget):
     def _save(self):
         if self._article_id is None:
             return
+        self._status_label.setText("Saving…")
+        QTimer.singleShot(0, self._do_save)
+
+    def _do_save(self):
         session = get_session()
         try:
             article = session.get(Article, self._article_id)
@@ -145,6 +154,8 @@ class ArticleDetail(QWidget):
             session.commit()
         finally:
             session.close()
+        self._status_label.setText("Saved ✓")
+        QTimer.singleShot(3000, lambda: self._status_label.setText(""))
         self.article_changed.emit()
 
     def _toggle_read(self):

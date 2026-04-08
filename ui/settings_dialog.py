@@ -11,7 +11,10 @@ Tab 2 — OCR & AI:
 
 from __future__ import annotations
 
+import shutil
+import sqlite3
 import subprocess
+from datetime import datetime
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
@@ -40,6 +43,7 @@ class SettingsDialog(QDialog):
         tabs = QTabWidget()
         tabs.addTab(self._build_general_tab(), "General")
         tabs.addTab(self._build_ocr_tab(), "OCR & AI")
+        tabs.addTab(self._build_remote_tab(), "Remote Database")
         layout.addWidget(tabs)
 
         buttons = QDialogButtonBox(
@@ -129,6 +133,36 @@ class SettingsDialog(QDialog):
 
         return widget
 
+    def _build_remote_tab(self) -> QWidget:
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        form = QFormLayout()
+
+        path_row = QHBoxLayout()
+        self._remote_path = QLineEdit()
+        self._remote_path.setPlaceholderText("e.g. G:\\My Drive\\Magazines\\magazine_library.db")
+        path_row.addWidget(self._remote_path)
+        browse_btn = QPushButton("Browse…")
+        browse_btn.clicked.connect(self._on_browse_remote)
+        path_row.addWidget(browse_btn)
+        form.addRow("Remote DB Path:", path_row)
+
+        self._last_sync_label = QLabel("Never")
+        self._last_sync_label.setStyleSheet("color: #666;")
+        form.addRow("Last Sync:", self._last_sync_label)
+
+        layout.addLayout(form)
+        layout.addSpacing(12)
+
+        sync_btn = QPushButton("Sync Local → Remote")
+        sync_btn.setFixedWidth(200)
+        sync_btn.clicked.connect(self._on_sync)
+        layout.addWidget(sync_btn)
+
+        return widget
+
     def _load(self):
         self._folder_field.setText(get_setting("watched_folder", ""))
 
@@ -155,6 +189,10 @@ class SettingsDialog(QDialog):
 
         self._ocr_lang.setText(get_setting("ocr_language", "eng"))
 
+        self._remote_path.setText(get_setting("remote_db_path", ""))
+        last_sync = get_setting("remote_db_last_sync", "")
+        self._last_sync_label.setText(last_sync if last_sync else "Never")
+
     def _save(self):
         set_setting("watched_folder", self._folder_field.text())
         set_setting("theme", "dark" if self._theme_dark.isChecked() else "light")
@@ -163,12 +201,87 @@ class SettingsDialog(QDialog):
         set_setting("ocr_confidence_threshold", str(self._threshold_slider.value()))
         set_setting("ocr_dpi", self._dpi_combo.currentText())
         set_setting("ocr_language", self._ocr_lang.text().strip() or "eng")
+        set_setting("remote_db_path", self._remote_path.text().strip())
         self.accept()
 
     def _on_browse(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Magazine Folder")
         if folder:
             self._folder_field.setText(folder)
+
+    def _on_browse_remote(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select Remote Database Location",
+            self._remote_path.text() or "magazine_library.db",
+            "SQLite Database (*.db)",
+        )
+        if path:
+            self._remote_path.setText(path)
+
+    def _on_sync(self):
+        remote_path = self._remote_path.text().strip()
+        if not remote_path:
+            QMessageBox.warning(self, "No Remote Path", "Set a remote DB path first.")
+            return
+
+        import os
+        remote_exists = os.path.exists(remote_path)
+
+        reply = QMessageBox.question(
+            self,
+            "Sync Database",
+            f"Copy local database to:\n{remote_path}\n\n"
+            + ("Server edits (read status, ratings, notes) will be merged first.\n\n"
+               if remote_exists else "")
+            + "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        try:
+            if remote_exists:
+                self._merge_from_remote(remote_path)
+            shutil.copy2(config.DB_PATH, remote_path)
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            set_setting("remote_db_path", remote_path)
+            set_setting("remote_db_last_sync", timestamp)
+            self._last_sync_label.setText(timestamp)
+            QMessageBox.information(self, "Sync Complete", "Database synced successfully.")
+        except Exception as e:
+            QMessageBox.critical(self, "Sync Failed", str(e))
+
+    def _merge_from_remote(self, remote_path: str) -> None:
+        """Pull server-editable fields from the remote DB into the local DB before overwriting."""
+        remote = sqlite3.connect(remote_path)
+        try:
+            # Articles: pull all fields the server can write
+            rows = remote.execute(
+                "SELECT id, is_read, rating, title, author, "
+                "page_start, page_end, keywords, notes FROM articles"
+            ).fetchall()
+            # Magazines: pull page_offset (adjustable from the server reader)
+            mag_rows = remote.execute(
+                "SELECT id, page_offset FROM magazines"
+            ).fetchall()
+        finally:
+            remote.close()
+
+        local = sqlite3.connect(config.DB_PATH)
+        try:
+            local.executemany(
+                "UPDATE articles SET is_read=?, rating=?, title=?, author=?, "
+                "page_start=?, page_end=?, keywords=?, notes=? WHERE id=?",
+                [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[0]) for r in rows],
+            )
+            local.executemany(
+                "UPDATE magazines SET page_offset=? WHERE id=?",
+                [(r[1], r[0]) for r in mag_rows],
+            )
+            local.commit()
+        finally:
+            local.close()
 
     def _view_log(self):
         try:
