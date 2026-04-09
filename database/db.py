@@ -8,6 +8,8 @@ Usage:
     session = get_session() # Returns a new SQLAlchemy session
 """
 
+import os
+
 from sqlalchemy import create_engine, event, text
 from sqlalchemy.orm import sessionmaker
 from database.models import Base
@@ -43,6 +45,7 @@ def init_db():
     Create all ORM tables and the FTS5 virtual table + sync triggers.
     Safe to call multiple times — uses CREATE TABLE IF NOT EXISTS semantics.
     """
+    os.makedirs(os.path.dirname(config.DB_PATH), exist_ok=True)
     engine = _get_engine()
     Base.metadata.create_all(engine)
     _migrate(engine)

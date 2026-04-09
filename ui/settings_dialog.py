@@ -11,7 +11,6 @@ Tab 2 — OCR & AI:
 
 from __future__ import annotations
 
-import shutil
 import sqlite3
 import subprocess
 from datetime import datetime
@@ -243,7 +242,17 @@ class SettingsDialog(QDialog):
         try:
             if remote_exists:
                 self._merge_from_remote(remote_path)
-            shutil.copy2(config.DB_PATH, remote_path)
+            # Use SQLite's online backup API instead of shutil.copy2 — shutil
+            # copies only the main .db file and misses any in-flight WAL pages,
+            # producing a "database disk image is malformed" error on the Pi.
+            # sqlite3.connect().backup() checkpoints the WAL and copies atomically.
+            src = sqlite3.connect(config.DB_PATH)
+            dst = sqlite3.connect(remote_path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+                src.close()
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             set_setting("remote_db_path", remote_path)
             set_setting("remote_db_last_sync", timestamp)

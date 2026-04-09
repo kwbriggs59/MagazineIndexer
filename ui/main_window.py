@@ -24,6 +24,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
+from sqlalchemy import select
+
 from database.db import init_db, get_session, get_setting, set_setting
 from database.models import Article, Magazine
 from ui.magazine_grid import MagazineGrid
@@ -84,6 +86,11 @@ class MainWindow(QMainWindow):
         add_doc_btn.setToolTip("Import a PDF book or individual article into the library")
         add_doc_btn.clicked.connect(self._on_add_document)
         row2.addWidget(add_doc_btn)
+
+        reimport_empty_btn = QPushButton("Re-import Empty…")
+        reimport_empty_btn.setToolTip("Delete and re-import all magazines that have no articles")
+        reimport_empty_btn.clicked.connect(self._on_reimport_empty)
+        row2.addWidget(reimport_empty_btn)
 
         idx_btn = QPushButton("Import Index…")
         idx_btn.setToolTip("Import a master index PDF to populate article catalog without PDFs")
@@ -190,6 +197,60 @@ class MainWindow(QMainWindow):
             self._magazine_grid.refresh()
         except Exception as e:
             QMessageBox.critical(self, "Error", str(e))
+
+    def _on_reimport_empty(self):
+        """Re-import all owned magazines that have no articles."""
+        pub = self._magazine_grid.current_pub_filter  # "All" or specific publication
+
+        session = get_session()
+        try:
+            has_articles = select(Article.magazine_id).distinct().scalar_subquery()
+            query = session.query(Magazine).filter(
+                Magazine.pdf_path.isnot(None),
+                Magazine.id.not_in(has_articles),
+            )
+            if pub != "All":
+                query = query.filter(Magazine.publication == pub)
+            mags = query.order_by(Magazine.publication, Magazine.year, Magazine.season).all()
+            pdf_paths = [m.pdf_path for m in mags]
+            mag_ids   = [m.id for m in mags]
+        finally:
+            session.close()
+
+        if not pdf_paths:
+            QMessageBox.information(
+                self, "Nothing to Re-import",
+                f"No magazines with an empty TOC found"
+                + (f" for '{pub}'." if pub != "All" else "."),
+            )
+            return
+
+        pub_label = f"'{pub}'" if pub != "All" else "all publications"
+        reply = QMessageBox.question(
+            self,
+            "Re-import Empty Magazines",
+            f"Found {len(pdf_paths)} magazine(s) with no articles for {pub_label}.\n\n"
+            "Each will be deleted from the database and re-imported.\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        session = get_session()
+        try:
+            for mag_id in mag_ids:
+                mag = session.get(Magazine, mag_id)
+                if mag:
+                    session.delete(mag)
+            session.commit()
+        finally:
+            session.close()
+
+        folder = get_setting("watched_folder", "")
+        dialog = ImportDialog(folder, parent=self, pdf_paths=pdf_paths)
+        dialog.exec()
+        self._magazine_grid.refresh()
 
     def _on_settings(self):
         dlg = SettingsDialog(self)

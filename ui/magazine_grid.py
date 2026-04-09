@@ -209,6 +209,11 @@ class MagazineGrid(QWidget):
         self._scroll.setWidget(self._grid_widget)
         layout.addWidget(self._scroll)
 
+    @property
+    def current_pub_filter(self) -> str:
+        """Return the active publication filter text ('All' or a publication name)."""
+        return self._pub_filter.currentText()
+
     def refresh(self):
         """Reload all magazine data from the DB and rebuild the grid."""
         session = get_session()

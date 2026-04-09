@@ -312,3 +312,35 @@ Tested against two PDFs:
 - Python is in Miniconda: `/c/Users/kwbri/.conda/envs/mag/python.exe`
 - Tesseract installed at: `C:\Program Files\Tesseract-OCR\tesseract.exe` (set in `config.py`) — only needed for image-only PDFs
 - Run all commands with the full conda env path or from within the activated `mag` environment
+
+## Pi Web Server (MagazineServer)
+
+A companion Flask app at `/home/kevin/MagazineServer` on a Raspberry Pi at `192.168.0.30` (port 5000). Serves the library to any browser on the local network. Managed as a systemd service (`magazine-server.service`).
+
+The DB lives on a Google Drive rclone mount at `/mnt/gdrive/magazine_library.db`. The service requires `rclone-gdrive.service` to be running first.
+
+### DB Sync Workflow
+
+1. In the desktop app: **Settings → Remote Database → Sync Local → Remote**
+   - Merges any server-side edits (ratings, read status, notes) back into the local DB first
+   - Uses `sqlite3.backup()` (not `shutil.copy2`) to copy atomically — safe while the server is running
+2. After syncing, restart the Pi server to pick up new data and re-prime the cover cache:
+   ```
+   ssh kevin@192.168.0.30 "sudo systemctl restart magazine-server"
+   ```
+
+You do **not** need to stop the server before syncing — SQLite's backup API and WAL mode handle concurrent access safely. But a restart afterward is required so SQLAlchemy's connection pool reconnects to the updated DB and the cover cache priming thread runs for any new magazines.
+
+### Cover Cache
+
+Covers (PNG blobs in `magazines.cover_image`) are extracted from the DB at startup and cached to `/home/kevin/MagazineServer/cover_cache/<id>.png` on the Pi's local disk by a background daemon thread. Subsequent requests serve from local disk, bypassing the slow rclone mount entirely.
+
+- Cache persists across restarts — only new/missing covers are written each time
+- After a DB sync with new magazines, restart the server to prime the new covers
+- If covers look stale or wrong: `rm /home/kevin/MagazineServer/cover_cache/*.png` then restart
+
+### Troubleshooting
+
+- **"database disk image is malformed"**: stale `.db-shm` file left by an unclean shutdown. Delete `/mnt/gdrive/magazine_library.db-shm` then restart.
+- **Port 5000 already in use after crash**: `ssh kevin@192.168.0.30 "sudo fuser -k 5000/tcp"` then restart.
+- **Logs**: `journalctl -u magazine-server -n 50 --no-pager`
