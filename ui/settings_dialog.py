@@ -15,17 +15,86 @@ import sqlite3
 import subprocess
 from datetime import datetime
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog, QTabWidget, QWidget, QVBoxLayout, QFormLayout,
     QLineEdit, QPushButton, QFileDialog, QSlider, QLabel,
     QHBoxLayout, QComboBox, QRadioButton, QButtonGroup,
-    QMessageBox, QDialogButtonBox,
+    QMessageBox, QDialogButtonBox, QProgressBar,
 )
 
 import config
 from database.db import get_setting, set_setting, get_session
 from database.models import Magazine, Article
+
+
+class _SyncWorker(QThread):
+    """Runs the DB sync (merge + backup) off the main thread."""
+
+    status = pyqtSignal(str)         # human-readable stage description
+    progress = pyqtSignal(int, int)  # (pages_done, pages_total)
+    finished = pyqtSignal(str)       # timestamp string on success
+    error = pyqtSignal(str)          # error message on failure
+
+    def __init__(self, remote_path: str):
+        super().__init__()
+        self._remote_path = remote_path
+
+    def run(self):
+        try:
+            import os
+            self.status.emit("Checking remote database…")
+            remote_exists = os.path.exists(self._remote_path)
+
+            if remote_exists:
+                self.status.emit("Merging server edits into local database…")
+                self._merge_from_remote()
+
+            self.status.emit("Copying local database to remote…")
+            src = sqlite3.connect(config.DB_PATH)
+            dst = sqlite3.connect(self._remote_path)
+            try:
+                src.backup(dst, pages=50, progress=self._on_backup_progress)
+            finally:
+                dst.close()
+                src.close()
+
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.finished.emit(timestamp)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def _on_backup_progress(self, status, remaining, total):
+        if total > 0:
+            self.progress.emit(total - remaining, total)
+
+    def _merge_from_remote(self):
+        remote = sqlite3.connect(self._remote_path)
+        try:
+            rows = remote.execute(
+                "SELECT id, is_read, rating, title, author, "
+                "page_start, page_end, keywords, notes FROM articles"
+            ).fetchall()
+            mag_rows = remote.execute(
+                "SELECT id, page_offset FROM magazines"
+            ).fetchall()
+        finally:
+            remote.close()
+
+        local = sqlite3.connect(config.DB_PATH)
+        try:
+            local.executemany(
+                "UPDATE articles SET is_read=?, rating=?, title=?, author=?, "
+                "page_start=?, page_end=?, keywords=?, notes=? WHERE id=?",
+                [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[0]) for r in rows],
+            )
+            local.executemany(
+                "UPDATE magazines SET page_offset=? WHERE id=?",
+                [(r[1], r[0]) for r in mag_rows],
+            )
+            local.commit()
+        finally:
+            local.close()
 
 
 class SettingsDialog(QDialog):
@@ -155,10 +224,10 @@ class SettingsDialog(QDialog):
         layout.addLayout(form)
         layout.addSpacing(12)
 
-        sync_btn = QPushButton("Sync Local → Remote")
-        sync_btn.setFixedWidth(200)
-        sync_btn.clicked.connect(self._on_sync)
-        layout.addWidget(sync_btn)
+        self._sync_btn = QPushButton("Sync Local → Remote")
+        self._sync_btn.setFixedWidth(200)
+        self._sync_btn.clicked.connect(self._on_sync)
+        layout.addWidget(self._sync_btn)
 
         return widget
 
@@ -224,73 +293,82 @@ class SettingsDialog(QDialog):
             QMessageBox.warning(self, "No Remote Path", "Set a remote DB path first.")
             return
 
-        import os
-        remote_exists = os.path.exists(remote_path)
-
         reply = QMessageBox.question(
             self,
             "Sync Database",
             f"Copy local database to:\n{remote_path}\n\n"
-            + ("Server edits (read status, ratings, notes) will be merged first.\n\n"
-               if remote_exists else "")
-            + "Continue?",
+            "If the remote file exists, server edits (read status, ratings, notes) "
+            "will be merged first.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        try:
-            if remote_exists:
-                self._merge_from_remote(remote_path)
-            # Use SQLite's online backup API instead of shutil.copy2 — shutil
-            # copies only the main .db file and misses any in-flight WAL pages,
-            # producing a "database disk image is malformed" error on the Pi.
-            # sqlite3.connect().backup() checkpoints the WAL and copies atomically.
-            src = sqlite3.connect(config.DB_PATH)
-            dst = sqlite3.connect(remote_path)
-            try:
-                src.backup(dst)
-            finally:
-                dst.close()
-                src.close()
-            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # --- progress dialog ---
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Syncing Database")
+        dlg.setFixedWidth(400)
+        dlg.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        vbox = QVBoxLayout(dlg)
+
+        status_lbl = QLabel("Starting…")
+        vbox.addWidget(status_lbl)
+
+        bar = QProgressBar()
+        bar.setRange(0, 0)   # indeterminate until we know total pages
+        bar.setTextVisible(True)
+        vbox.addWidget(bar)
+
+        size_lbl = QLabel("")
+        size_lbl.setStyleSheet("color: #666; font-size: 11px;")
+        vbox.addWidget(size_lbl)
+
+        close_btn = QPushButton("Close")
+        close_btn.setEnabled(False)
+        close_btn.clicked.connect(dlg.accept)
+        vbox.addWidget(close_btn, alignment=Qt.AlignmentFlag.AlignRight)
+
+        # --- worker ---
+        self._sync_btn.setEnabled(False)
+        worker = _SyncWorker(remote_path)
+        self._worker = worker   # keep reference alive
+
+        def on_status(msg):
+            status_lbl.setText(msg)
+
+        def on_progress(done, total):
+            if bar.maximum() == 0:
+                bar.setRange(0, total)
+            bar.setValue(done)
+            mb_done = done * 4096 / (1024 * 1024)
+            mb_total = total * 4096 / (1024 * 1024)
+            size_lbl.setText(f"{mb_done:.1f} MB / {mb_total:.1f} MB")
+
+        def on_finished(timestamp):
             set_setting("remote_db_path", remote_path)
             set_setting("remote_db_last_sync", timestamp)
             self._last_sync_label.setText(timestamp)
-            QMessageBox.information(self, "Sync Complete", "Database synced successfully.")
-        except Exception as e:
-            QMessageBox.critical(self, "Sync Failed", str(e))
+            status_lbl.setText("Sync complete.")
+            bar.setRange(0, 1)
+            bar.setValue(1)
+            size_lbl.setText(timestamp)
+            close_btn.setEnabled(True)
+            self._sync_btn.setEnabled(True)
 
-    def _merge_from_remote(self, remote_path: str) -> None:
-        """Pull server-editable fields from the remote DB into the local DB before overwriting."""
-        remote = sqlite3.connect(remote_path)
-        try:
-            # Articles: pull all fields the server can write
-            rows = remote.execute(
-                "SELECT id, is_read, rating, title, author, "
-                "page_start, page_end, keywords, notes FROM articles"
-            ).fetchall()
-            # Magazines: pull page_offset (adjustable from the server reader)
-            mag_rows = remote.execute(
-                "SELECT id, page_offset FROM magazines"
-            ).fetchall()
-        finally:
-            remote.close()
+        def on_error(msg):
+            status_lbl.setText(f"Error: {msg}")
+            bar.setRange(0, 1)
+            bar.setValue(0)
+            close_btn.setEnabled(True)
+            self._sync_btn.setEnabled(True)
 
-        local = sqlite3.connect(config.DB_PATH)
-        try:
-            local.executemany(
-                "UPDATE articles SET is_read=?, rating=?, title=?, author=?, "
-                "page_start=?, page_end=?, keywords=?, notes=? WHERE id=?",
-                [(r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[0]) for r in rows],
-            )
-            local.executemany(
-                "UPDATE magazines SET page_offset=? WHERE id=?",
-                [(r[1], r[0]) for r in mag_rows],
-            )
-            local.commit()
-        finally:
-            local.close()
+        worker.status.connect(on_status)
+        worker.progress.connect(on_progress)
+        worker.finished.connect(on_finished)
+        worker.error.connect(on_error)
+
+        worker.start()
+        dlg.exec()
 
     def _view_log(self):
         try:
