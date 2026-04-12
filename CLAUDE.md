@@ -317,14 +317,24 @@ Tested against two PDFs:
 
 A companion Flask app at `/home/kevin/MagazineServer` on a Raspberry Pi at `192.168.0.30` (port 5000). Serves the library to any browser on the local network. Managed as a systemd service (`magazine-server.service`).
 
-The DB lives on a Google Drive rclone mount at `/mnt/gdrive/magazine_library.db`. The service requires `rclone-gdrive.service` to be running first.
+**PDF storage:** WD My Passport USB drive mounted at `/mnt/usbdrive`; magazine PDFs in `/mnt/usbdrive/Magazines/`. The service sets `MAGAZINE_MOUNT_ROOT=/mnt/usbdrive/Magazines` so `config.py` resolves Windows DB paths to the correct USB location.
+
+**DB storage:** `/home/kevin/magazine_library.db` on the Pi's SD card (not on the USB drive or GDrive mount).
+
+**Samba share:** The USB drive is shared as `\\192.168.0.30\MyPassport` (user: `kevin`) for direct access from Windows.
+
+The rclone GDrive mount (`rclone-gdrive.service` → `/mnt/gdrive`) is still running on the Pi but is no longer used for PDF serving — it is only needed during DB sync. The `magazine-server.service` lists it as `Wants` (not `Requires`) so the server starts even if rclone is not running.
 
 ### DB Sync Workflow
 
 1. In the desktop app: **Settings → Remote Database → Sync Local → Remote**
    - Merges any server-side edits (ratings, read status, notes) back into the local DB first
    - Uses `sqlite3.backup()` (not `shutil.copy2`) to copy atomically — safe while the server is running
-2. After syncing, restart the Pi server to pick up new data and re-prime the cover cache:
+2. Copy the updated DB to the Pi:
+   ```
+   scp magazine_library.db kevin@192.168.0.30:/home/kevin/magazine_library.db
+   ```
+3. Restart the Pi server to pick up new data and re-prime the cover cache:
    ```
    ssh kevin@192.168.0.30 "sudo systemctl restart magazine-server"
    ```
@@ -333,7 +343,7 @@ You do **not** need to stop the server before syncing — SQLite's backup API an
 
 ### Cover Cache
 
-Covers (PNG blobs in `magazines.cover_image`) are extracted from the DB at startup and cached to `/home/kevin/MagazineServer/cover_cache/<id>.png` on the Pi's local disk by a background daemon thread. Subsequent requests serve from local disk, bypassing the slow rclone mount entirely.
+Covers (PNG blobs in `magazines.cover_image`) are extracted from the DB at startup and cached to `/home/kevin/MagazineServer/cover_cache/<id>.png` on the Pi's local disk by a background daemon thread. Subsequent requests serve from local disk.
 
 - Cache persists across restarts — only new/missing covers are written each time
 - After a DB sync with new magazines, restart the server to prime the new covers
@@ -341,6 +351,8 @@ Covers (PNG blobs in `magazines.cover_image`) are extracted from the DB at start
 
 ### Troubleshooting
 
-- **"database disk image is malformed"**: stale `.db-shm` file left by an unclean shutdown. Delete `/mnt/gdrive/magazine_library.db-shm` then restart.
-- **Port 5000 already in use after crash**: `ssh kevin@192.168.0.30 "sudo fuser -k 5000/tcp"` then restart.
+- **PDF returns 404**: verify USB drive is mounted (`mountpoint /mnt/usbdrive`); check `MAGAZINE_MOUNT_ROOT` in the service env
+- **"database disk image is malformed"**: stale `.db-shm` file. Delete it then restart.
+- **USB not mounted after reboot**: `sudo mount -a`; check `dmesg` for NTFS errors
+- **Port 5000 already in use after crash**: `ssh kevin@192.168.0.30 "sudo fuser -k 5000/tcp"` then restart
 - **Logs**: `journalctl -u magazine-server -n 50 --no-pager`
